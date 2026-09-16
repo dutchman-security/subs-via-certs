@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-ct_subs v3 - 3-combo subdomain enumeration, no local downloads. All via internet.
-  [1] crt.sh API (primary CT mirror)
-  [2] Direct CT logs (Google Argus / Cloudflare Nimbus / DigiCert health) + certstream search API + certspotter + OTX
-  [3] Active direct: AXFR -> NSEC/NSEC3 walk -> wordlist bruteforce vs auth NS -> TLS SAN expansion per live host
-
-Terminal shows all three sections. If any source misses, others fill the gap.
-Merged final output = accurate + most complete.
+SUBS-VIA-CERTS v3 - 3-combo subdomain enumeration via Certificate Transparency
+No local downloads. All internet-based. Three phases that fill each other's gaps.
 """
 import argparse
 import concurrent.futures
 import re
 import socket
 import ssl
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -30,7 +26,40 @@ except ImportError:
 TIMEOUT = 15
 THREADS = 20
 
-# ---- [2] direct CT log endpoints (health / STH, proves live CT connectivity) ----
+# ─── colors ───
+class C:
+    R = '\033[91m'      # red
+    G = '\033[92m'      # green
+    Y = '\033[93m'      # yellow
+    B = '\033[94m'      # blue
+    M = '\033[95m'      # magenta
+    C = '\033[96m'      # cyan
+    W = '\033[97m'      # white
+    D = '\033[90m'      # dim
+    BD = '\033[1m'      # bold
+    UL = '\033[4m'      # underline
+    X = '\033[0m'       # reset
+
+def c(text, color): return f"{color}{text}{C.X}"
+def ok(t): return c(f"  [✓] {t}", C.G)
+def fail(t): return c(f"  [✗] {t}", C.R)
+def warn(t): return c(f"  [!] {t}", C.Y)
+def info(t): return c(f"  [*] {t}", C.C)
+def dim(t): return c(t, C.D)
+def bold(t): return c(t, C.BD)
+def mag(t): return c(t, C.M)
+
+# ─── compact banner ───
+BANNER = f"""
+{C.M}{C.BD}╔══════════════════════════════════════════════════════════════╗
+║  {C.W}{C.BD}SUBS-VIA-CERTS{C.X}{C.M}{C.BD}  v3.0  •  3-phase CT subdomain enum  ║
+║  {C.D}crt.sh  +  direct CT logs  +  active recon{C.M}{C.BD}           ║
+║  {C.D}no local DB  •  no downloads  •  gap-filling by design{C.M}{C.BD}  ║
+║  {C.D}developed by Dutchman Security{C.M}{C.BD}                        ║
+╚══════════════════════════════════════════════════════════════╝{C.X}
+"""
+
+# ─── CT endpoints ───
 CT_LOGS_DIRECT = {
     "google-argus":    "https://ct.googleapis.com/logs/argus2027/ct/v1/get-sth",
     "cloudflare-nimbus": "https://ct.cloudflare.com/logs/nimbus2027/ct/v1/get-sth",
@@ -86,7 +115,9 @@ def parse_nb(nb):
     except Exception:
         return None
 
-# ============ [1] crt.sh ============
+# ═══════════════════════════════════════════════════════════════
+# PHASE 1 — crt.sh
+# ═══════════════════════════════════════════════════════════════
 def source_crtsh(domain):
     tag = "crt.sh"
     found = 0
@@ -102,12 +133,15 @@ def source_crtsh(domain):
                     add_sub(name, tag, dt)
                     found += 1
         stats[tag] = f"OK ({found} raw entries)"
+        print(ok(f"{tag}: {found} entries"))
     except Exception as e:
-        stats[tag] = f"FAIL ({str(e)[:120]})"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+        stats[tag] = f"FAIL ({str(e)[:100]})"
+        print(fail(f"{tag}: {str(e)[:100]}"))
     return found
 
-# ============ [2] direct CT logs + caches ============
+# ═══════════════════════════════════════════════════════════════
+# PHASE 2 — direct CT logs + caches
+# ═══════════════════════════════════════════════════════════════
 def source_ct_log_health(name, url):
     tag = f"CT-direct:{name}"
     try:
@@ -115,12 +149,13 @@ def source_ct_log_health(name, url):
         r.raise_for_status()
         sth = r.json()
         stats[tag] = f"OK (live, tree_size={sth.get('tree_size')}, ts={sth.get('timestamp')})"
+        print(ok(f"{tag}: live (tree={sth.get('tree_size'):,})"))
     except Exception as e:
-        stats[tag] = f"FAIL ({str(e)[:100]})"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+        stats[tag] = f"FAIL ({str(e)[:80]})"
+        print(fail(f"{tag}: {str(e)[:80]}"))
 
 def source_certspotter(domain):
-    tag = "certspotter(direct-CT)"
+    tag = "certspotter"
     try:
         r = requests.get(CERTSPOTTER_API.format(d=domain), timeout=30)
         r.raise_for_status()
@@ -133,12 +168,13 @@ def source_certspotter(domain):
                     add_sub(name, tag)
                     n += 1
         stats[tag] = f"OK ({n} names)"
+        print(ok(f"{tag}: {n} names"))
     except Exception as e:
-        stats[tag] = f"FAIL ({str(e)[:120]})"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+        stats[tag] = f"FAIL ({str(e)[:100]})"
+        print(fail(f"{tag}: {str(e)[:100]}"))
 
 def source_certstream(domain):
-    tag = "certstream-cache"
+    tag = "certstream"
     try:
         r = requests.get(CERTSTREAM_SEARCH.format(d=domain), timeout=30)
         r.raise_for_status()
@@ -156,12 +192,13 @@ def source_certstream(domain):
                     add_sub(name, tag)
                     n += 1
         stats[tag] = f"OK ({n} names)"
+        print(ok(f"{tag}: {n} names"))
     except Exception as e:
-        stats[tag] = f"FAIL ({str(e)[:120]})"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+        stats[tag] = f"FAIL ({str(e)[:100]})"
+        print(fail(f"{tag}: {str(e)[:100]}"))
 
 def source_otx(domain):
-    tag = "otx(passiveDNS)"
+    tag = "otx"
     try:
         r = None
         for _ in range(3):
@@ -170,8 +207,8 @@ def source_otx(domain):
                 break
             time.sleep(3)
         if r.status_code == 403:
-            stats[tag] = "SKIP (needs free OTX API key)"
-            print(f"  [{tag}] {stats[tag]}", flush=True)
+            stats[tag] = "SKIP (needs OTX API key)"
+            print(warn(f"{tag}: needs free API key"))
             return
         r.raise_for_status()
         data = r.json()
@@ -182,11 +219,14 @@ def source_otx(domain):
                 add_sub(name, tag)
                 n += 1
         stats[tag] = f"OK ({n} names)"
+        print(ok(f"{tag}: {n} names"))
     except Exception as e:
-        stats[tag] = f"FAIL ({str(e)[:120]})"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+        stats[tag] = f"FAIL ({str(e)[:100]})"
+        print(fail(f"{tag}: {str(e)[:100]}"))
 
-# ============ [3] active direct ============
+# ═══════════════════════════════════════════════════════════════
+# PHASE 3 — active direct
+# ═══════════════════════════════════════════════════════════════
 def get_auth_ns(domain):
     if not HAVE_DNS:
         return []
@@ -197,11 +237,11 @@ def get_auth_ns(domain):
         return []
 
 def try_axfr(domain, ns_list):
-    tag = "axfr(direct)"
+    tag = "axfr"
     got = 0
     if not HAVE_DNS:
         stats[tag] = "SKIP (dnspython missing)"
-        print(f"  [{tag}] {stats[tag]}", flush=True)
+        print(warn(f"{tag}: dnspython not installed"))
         return
     for ns in ns_list:
         try:
@@ -212,18 +252,18 @@ def try_axfr(domain, ns_list):
                 add_sub(sub.lower(), tag)
                 got += 1
             stats[tag] = f"OK via {ns} ({got} records)"
-            print(f"  [{tag}] {stats[tag]}", flush=True)
+            print(ok(f"{tag}: {got} records via {ns}"))
             return
         except Exception:
             continue
-    stats[tag] = "OK (no server allowed AXFR - normal, others fill gap)"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+    stats[tag] = "OK (no AXFR allowed - normal)"
+    print(info(f"{tag}: no server allowed AXFR (others fill gap)"))
 
 def try_nsec_walk(domain, ns_list):
-    tag = "nsec-walk(direct)"
+    tag = "nsec-walk"
     if not HAVE_DNS:
         stats[tag] = "SKIP (dnspython missing)"
-        print(f"  [{tag}] {stats[tag]}", flush=True)
+        print(warn(f"{tag}: dnspython not installed"))
         return
     found = set()
     try:
@@ -242,9 +282,10 @@ def try_nsec_walk(domain, ns_list):
             except Exception:
                 break
         stats[tag] = f"OK ({len(found)} names walked)"
+        print(ok(f"{tag}: {len(found)} names"))
     except Exception as e:
-        stats[tag] = f"FAIL ({str(e)[:100]})"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+        stats[tag] = f"FAIL ({str(e)[:80]})"
+        print(fail(f"{tag}: {str(e)[:80]}"))
 
 def _resolve_one(name):
     try:
@@ -254,7 +295,7 @@ def _resolve_one(name):
         return None
 
 def wordlist_bruteforce(domain, wordlist):
-    tag = "bruteforce(auth-NS)"
+    tag = "bruteforce"
     cands = [f"{w}.{domain}" for w in wordlist]
     live = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=THREADS) as ex:
@@ -263,8 +304,7 @@ def wordlist_bruteforce(domain, wordlist):
                 live.append(res)
                 add_sub(res, tag)
     stats[tag] = f"OK ({len(live)}/{len(cands)} live)"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
-    return live
+    print(ok(f"{tag}: {len(live)}/{len(cands)} live"))
 
 def grab_san(host, port=443):
     try:
@@ -287,7 +327,7 @@ def grab_san(host, port=443):
         return []
 
 def tls_san_expansion(domain, extra_ports=(443, 8443)):
-    tag = "tls-SAN(direct)"
+    tag = "tls-SAN"
     seeds = list({domain} | {h for h in list(results.keys()) if valid_sub(h, domain)})
     new = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=THREADS) as ex:
@@ -302,11 +342,80 @@ def tls_san_expansion(domain, extra_ports=(443, 8443)):
                     add_sub(name, tag)
                     new += 1
     stats[tag] = f"OK ({new} new from SANs over {len(seeds)} seeds)"
-    print(f"  [{tag}] {stats[tag]}", flush=True)
+    print(ok(f"{tag}: {new} new from {len(seeds)} seeds"))
 
-# ============ main ============
+# ═══════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════
+def print_phase_header(num, total, title):
+    bar = "█" * num + "░" * (total - num)
+    print(f"\n{C.BD}{C.B}[{num}/{total}]{C.X} {C.W}{title}{C.X}  {C.D}{bar}{C.X}")
+
+def print_target(domain):
+    print(f"\n{C.BD}{C.C}▶ TARGET{C.X}  {C.W}{domain}{C.X}")
+
+def print_ns(ns_list):
+    if ns_list:
+        print(f"{C.BD}{C.C}▶ AUTH NS{C.X}  {C.W}{', '.join(ns_list)}{C.X}")
+    else:
+        print(f"{C.BD}{C.C}▶ AUTH NS{C.X}  {C.Y}none found (system resolver){C.X}")
+
+def print_summary(domain, output_file=None):
+    total = len(results)
+    print(f"\n{C.BD}{C.G}═══ RESULTS ═══{C.X}")
+    print(f"{C.BD}{C.W}Total unique subdomains: {C.G}{total}{C.X}")
+    print(f"{C.D}{'─' * 110}{C.X}")
+    print(f"{C.BD}{C.W}{'Subdomain':<55} {'Earliest Cert':<15} Sources{C.X}")
+    print(f"{C.D}{'─' * 110}{C.X}")
+
+    ordered = sorted(results.items(),
+                     key=lambda kv: (kv[1]['date'] is None, kv[1]['date'] or datetime.max, kv[0]))
+    for sub, info in ordered:
+        dt = info["date"].strftime("%Y-%m-%d") if info["date"] else c("-", C.D)
+        srcs = ",".join(sorted(info["sources"]))
+        src_colored = []
+        for s in sorted(info["sources"]):
+            if "crt.sh" in s: src_colored.append(c(s, C.C))
+            elif "certspotter" in s: src_colored.append(c(s, C.M))
+            elif "certstream" in s: src_colored.append(c(s, C.B))
+            elif "otx" in s: src_colored.append(c(s, C.Y))
+            elif "axfr" in s: src_colored.append(c(s, C.G))
+            elif "nsec" in s: src_colored.append(c(s, C.G))
+            elif "brute" in s: src_colored.append(c(s, C.R))
+            elif "tls" in s: src_colored.append(c(s, C.M))
+            elif "CT-direct" in s: src_colored.append(c(s, C.B))
+            else: src_colored.append(s)
+        print(f"{C.W}{sub:<55}{C.X} {dt:<15} {', '.join(src_colored)}")
+
+    print(f"\n{C.BD}{C.C}═══ PER-SOURCE STATS ═══{C.X}  {C.D}(missing = others filled gap){C.X}")
+    for k, v in stats.items():
+        if "OK" in v:
+            print(f"  {c('✓', C.G)} {c(k, C.W)}: {c(v, C.G)}")
+        elif "SKIP" in v:
+            print(f"  {c('⊘', C.Y)} {c(k, C.W)}: {c(v, C.Y)}")
+        else:
+            print(f"  {c('✗', C.R)} {c(k, C.W)}: {c(v, C.R)}")
+
+    if output_file:
+        with open(output_file, "w") as f:
+            for sub in sorted(results):
+                f.write(sub + "\n")
+        print(f"\n{c('✓', C.G)} {c('Saved:', C.W)} {C.G}{output_file}{C.X} ({total} subdomains)")
+
 def main():
-    ap = argparse.ArgumentParser(description="ct_subs v3 - 3-combo subdomain enum (crt.sh + direct CT + active direct)")
+    print(BANNER)
+
+    ap = argparse.ArgumentParser(
+        description="SUBS-VIA-CERTS v3 - 3-phase CT subdomain enumeration",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+{C.D}examples:{C.X}
+  python3 ct_subs.py target.com                    # full 3-phase
+  python3 ct_subs.py target.com --no-active        # passive only
+  python3 ct_subs.py target.com -w wordlist.txt    # custom wordlist
+  python3 ct_subs.py target.com -o subs.txt        # save to file
+        """
+    )
     ap.add_argument("domain", help="target domain (example.com)")
     ap.add_argument("-w", "--wordlist", help="custom wordlist file (one per line)")
     ap.add_argument("--no-active", action="store_true", help="skip active direct phase")
@@ -314,6 +423,7 @@ def main():
     ap.add_argument("--no-ct", action="store_true", help="skip direct-CT phase")
     ap.add_argument("-o", "--output", help="save results to file")
     args = ap.parse_args()
+
     domain = args.domain.lower().strip()
 
     wordlist = DEFAULT_WORDLIST
@@ -321,20 +431,21 @@ def main():
         try:
             with open(args.wordlist) as f:
                 wordlist = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+            print(info(f"loaded custom wordlist: {len(wordlist)} entries"))
         except Exception as e:
-            print(f"[!] wordlist load fail: {e}, using builtin")
+            print(warn(f"wordlist load failed: {e}, using builtin ({len(DEFAULT_WORDLIST)} entries)"))
 
-    print(f"[*] target: {domain}\n")
+    print_target(domain)
 
-    # ---- [1/3] ----
-    print("[1/3] crt.sh (primary CT mirror) ...")
+    # ═══ PHASE 1 ═══
+    print_phase_header(1, 3, "crt.sh (primary CT mirror)")
     if not args.no_crtsh:
         source_crtsh(domain)
     else:
-        print("  skipped (--no-crtsh) -> other combos will fill gap")
+        print(warn("skipped (--no-crtsh) → other phases fill gap"))
 
-    # ---- [2/3] ----
-    print("[2/3] direct CT logs (Google/Cloudflare/DigiCert) + certstream cache ...")
+    # ═══ PHASE 2 ═══
+    print_phase_header(2, 3, "direct CT logs + caches (certspotter, certstream, OTX)")
     if not args.no_ct:
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
             futs = []
@@ -346,40 +457,27 @@ def main():
             for _ in concurrent.futures.as_completed(futs):
                 pass
     else:
-        print("  skipped (--no-ct) -> crt.sh + active will fill gap")
+        print(warn("skipped (--no-ct) → crt.sh + active fill gap"))
 
-    # ---- [3/3] ----
+    # ═══ PHASE 3 ═══
     if not args.no_active:
-        print("[3/3] active direct (AXFR -> NSEC walk -> bruteforce vs auth NS -> TLS SAN) ...")
+        print_phase_header(3, 3, "active direct (AXFR → NSEC → bruteforce → TLS SAN)")
         ns_list = get_auth_ns(domain)
-        print(f"  [auth-NS] {', '.join(ns_list) if ns_list else 'none found (using system resolver, others fill gap)'}")
+        print_ns(ns_list)
         try_axfr(domain, ns_list)
         try_nsec_walk(domain, ns_list)
         wordlist_bruteforce(domain, wordlist)
         tls_san_expansion(domain)
     else:
-        print("[3/3] skipped (--no-active) -> passive combos fill gap")
+        print_phase_header(3, 3, "active direct")
+        print(warn("skipped (--no-active) → passive phases fill gap"))
 
-    # ---- merged output ----
-    print(f"\n[+] total unique subdomains: {len(results)}")
-    print(f"{'Subdomain':<55} {'Earliest Cert':<15} Sources")
-    print("-" * 120)
-    ordered = sorted(results.items(),
-                     key=lambda kv: (kv[1]['date'] is None, kv[1]['date'] or datetime.max, kv[0]))
-    for sub, info in ordered:
-        dt = info["date"].strftime("%Y-%m-%d") if info["date"] else "-"
-        srcs = ",".join(sorted(info["sources"]))
-        print(f"{sub:<55} {dt:<15} {srcs}")
-
-    print("\n[*] per-source stats (missing = others filled gap):")
-    for k, v in stats.items():
-        print(f"    {k}: {v}")
-
-    if args.output:
-        with open(args.output, "w") as f:
-            for sub in sorted(results):
-                f.write(sub + "\n")
-        print(f"\n[+] saved to {args.output}")
+    # ═══ RESULTS ═══
+    print_summary(domain, args.output)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{warn('interrupted by user')}")
+        sys.exit(130)
