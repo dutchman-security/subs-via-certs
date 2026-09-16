@@ -3,7 +3,7 @@
 **No local databases. No downloads. All internet-based. Three independent phases that fill each other's gaps.**
 
 ```
-https://github.com/dutchman-security/certs-extractor
+https://github.com/dutchman-security/subs-via-certs
 ```
 
 ---
@@ -33,8 +33,8 @@ This tool gives you that visibility — fast, complete, zero maintenance.
 ## Installation
 
 ```bash
-git clone https://github.com/dutchman-security/certs-extractor
-cd certs-extractor
+git clone https://github.com/dutchman-security/subs-via-certs
+cd subs-via-certs
 
 # Install dependencies
 pip install -r requirements.txt
